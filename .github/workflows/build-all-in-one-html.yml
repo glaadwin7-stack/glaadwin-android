@@ -1,0 +1,58 @@
+name: Export All-in-One Glaadwin AI HTML
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-html:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build single all-in-one index.html
+        run: |
+          python3 - << 'EOF'
+          import os, glob, base64, re
+
+          candidates = sorted(glob.glob("app/src/main/assets/*.html") + glob.glob("*.html"))
+          if not candidates:
+              raise SystemExit("No HTML file found in app/src/main/assets/ or root.")
+          src_html = next((c for c in candidates if os.path.basename(c) == "index.html"), candidates[0])
+          with open(src_html, "r", encoding="utf-8") as f:
+              html = f.read()
+
+          logo_candidates = glob.glob("app/src/main/res/drawable/ic_launcher.*")
+          if logo_candidates:
+              logo_path = logo_candidates[0]
+              ext = os.path.splitext(logo_path)[1].lower().lstrip(".")
+              mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+              with open(logo_path, "rb") as lf:
+                  b64 = base64.b64encode(lf.read()).decode("ascii")
+              data_uri = f"data:{mime};base64,{b64}"
+              if re.search(r'<link[^>]+rel="icon"[^>]*>', html):
+                  html = re.sub(
+                      r'<link[^>]+rel="icon"[^>]*>',
+                      f'<link rel="icon" type="{mime}" href="{data_uri}" />',
+                      html,
+                      count=1
+                  )
+              else:
+                  html = html.replace("</head>", f'<link rel="icon" type="{mime}" href="{data_uri}" />\n</head>', 1)
+
+          os.makedirs("output", exist_ok=True)
+          with open("output/index.html", "w", encoding="utf-8") as out:
+              out.write(html)
+          print(f"Built single all-in-one output/index.html from {src_html} ({len(html)} bytes)")
+          EOF
+
+      - name: Upload single all-in-one index.html
+        uses: actions/upload-artifact@v4
+        with:
+          name: glaadwin-ai-all-in-one-html
+          path: output/index.html
+          if-no-files-found: error
+          
