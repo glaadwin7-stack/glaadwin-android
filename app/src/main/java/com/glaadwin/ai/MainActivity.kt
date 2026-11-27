@@ -2,6 +2,7 @@ package com.glaadwin.ai
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -21,8 +22,10 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -31,12 +34,14 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewAssetLoader
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var statusLabel: TextView
     private lateinit var wakeToggleBtn: Button
+    private lateinit var elevenLabs: ElevenLabsSpeaker
     private var pendingWebPermission: PermissionRequest? = null
     private var startWakeAfterPermission: Boolean = false
 
@@ -64,12 +69,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        elevenLabs = ElevenLabsSpeaker(this)
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#040914"))
         }
 
-        // Handle Android 16 edge-to-edge status & navigation bars cleanly
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
@@ -80,13 +86,13 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#081224"))
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
         }
 
         statusLabel = TextView(this).apply {
             text = "Hey Glaadwin: OFF"
             setTextColor(Color.parseColor("#22d3ee"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
@@ -95,8 +101,23 @@ class MainActivity : AppCompatActivity() {
             isAllCaps = false
             setTextColor(Color.parseColor("#040914"))
             setBackgroundColor(Color.parseColor("#22d3ee"))
-            setPadding(dp(12), dp(4), dp(12), dp(4))
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             setOnClickListener { toggleWakeWord() }
+        }
+
+        val voiceBtn = Button(this).apply {
+            text = "Voice"
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#0f2942"))
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = dp(6)
+            }
+            setOnClickListener { openVoiceSettingsDialog() }
         }
 
         val exitBtn = Button(this).apply {
@@ -104,18 +125,19 @@ class MainActivity : AppCompatActivity() {
             isAllCaps = false
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#1e293b"))
-            setPadding(dp(12), dp(4), dp(12), dp(4))
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                marginStart = dp(8)
+                marginStart = dp(6)
             }
             setOnClickListener { exitAssistantCompletely() }
         }
 
         controlBar.addView(statusLabel)
         controlBar.addView(wakeToggleBtn)
+        controlBar.addView(voiceBtn)
         controlBar.addView(exitBtn)
 
         webView = WebView(this).apply {
@@ -182,6 +204,11 @@ class MainActivity : AppCompatActivity() {
                 openExternalUrl(url)
                 return true
             }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                injectElevenLabsHook()
+            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -245,6 +272,79 @@ class MainActivity : AppCompatActivity() {
         refreshWakeUi()
     }
 
+    private fun injectElevenLabsHook() {
+        val hookJs = """
+            (function() {
+                if (window.__glaadwinElevenHooked) return;
+                window.__glaadwinElevenHooked = true;
+                if (!window.speechSynthesis) return;
+                const origSpeak = window.speechSynthesis.speak.bind(window.speechSynthesis);
+                window.__glaadwinOrigSpeak = origSpeak;
+                window.speechSynthesis.speak = function(utterance) {
+                    try {
+                        if (window.GlaadwinAndroid && window.GlaadwinAndroid.isElevenLabsReady() && utterance && utterance.text) {
+                            window.GlaadwinAndroid.speakElevenLabs(String(utterance.text));
+                            return;
+                        }
+                    } catch (e) {}
+                    return origSpeak(utterance);
+                };
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(hookJs, null)
+    }
+
+    private fun openVoiceSettingsDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+
+        val apiKeyInput = EditText(this).apply {
+            hint = "ElevenLabs API Key (sk_...)"
+            setText(elevenLabs.getApiKey())
+            isSingleLine = true
+        }
+
+        val voiceIdInput = EditText(this).apply {
+            hint = "Voice ID (default: George)"
+            setText(elevenLabs.getVoiceId())
+            isSingleLine = true
+        }
+
+        container.addView(apiKeyInput)
+        container.addView(voiceIdInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("ElevenLabs Voice Settings")
+            .setView(container)
+            .setPositiveButton("Save & Test") { _, _ ->
+                val key = apiKeyInput.text.toString().trim()
+                val voiceId = voiceIdInput.text.toString().trim()
+                elevenLabs.saveSettings(key, voiceId)
+                if (elevenLabs.isConfigured()) {
+                    Toast.makeText(this, "Testing ElevenLabs voice...", Toast.LENGTH_SHORT).show()
+                    elevenLabs.speak("Glaadwin AI online. ElevenLabs voice is ready.") {
+                        runOnUiThread {
+                            Toast.makeText(
+                                this,
+                                "ElevenLabs test failed — check API key or internet",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                } else {
+                    Toast.makeText(this, "Using built-in Android voice", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNeutralButton("Clear") { _, _ ->
+                elevenLabs.saveSettings("", ElevenLabsSpeaker.DEFAULT_VOICE_ID)
+                Toast.makeText(this, "ElevenLabs cleared", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -253,7 +353,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Pause background Vosk mic while app is open so HTML voice commands work cleanly
         if (WakeWordService.isRunning) {
             sendServiceAction(WakeWordService.ACTION_PAUSE)
         }
@@ -262,7 +361,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Resume "Hey Glaadwin" listening when user leaves the app
         if (WakeWordService.isRunning) {
             sendServiceAction(WakeWordService.ACTION_RESUME)
         }
@@ -301,7 +399,6 @@ class MainActivity : AppCompatActivity() {
         }
         ContextCompat.startForegroundService(this, intent)
         WakeWordService.isRunning = true
-        // Pause immediately while user is still inside the app; it resumes on minimize
         sendServiceAction(WakeWordService.ACTION_PAUSE)
         refreshWakeUi()
     }
@@ -315,7 +412,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshWakeUi() {
         if (WakeWordService.isRunning) {
-            statusLabel.text = "Hey Glaadwin: ON (active when minimized)"
+            statusLabel.text = "Hey Glaadwin: ON"
             wakeToggleBtn.text = "Stop Wake"
         } else {
             statusLabel.text = "Hey Glaadwin: OFF"
@@ -324,6 +421,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun exitAssistantCompletely() {
+        elevenLabs.stop()
         if (WakeWordService.isRunning) {
             sendServiceAction(WakeWordService.ACTION_STOP)
             WakeWordService.isRunning = false
@@ -387,6 +485,22 @@ class MainActivity : AppCompatActivity() {
         fun isAndroidApp(): Boolean = true
 
         @JavascriptInterface
+        fun isElevenLabsReady(): Boolean = elevenLabs.isConfigured()
+
+        @JavascriptInterface
+        fun speakElevenLabs(text: String) {
+            elevenLabs.speak(text) {
+                runOnUiThread {
+                    val quoted = JSONObject.quote(text)
+                    webView.evaluateJavascript(
+                        "if(window.__glaadwinOrigSpeak){window.__glaadwinOrigSpeak(new SpeechSynthesisUtterance($quoted));}",
+                        null
+                    )
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun startWakeWord() {
             runOnUiThread {
                 if (!WakeWordService.isRunning) toggleWakeWord()
@@ -407,6 +521,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        elevenLabs.stop()
         webView.destroy()
         super.onDestroy()
     }
