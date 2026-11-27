@@ -1,0 +1,67 @@
+name: Export Glaadwin AI Vercel ZIP
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  export-zip:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package website files into Vercel-ready ZIP
+        run: |
+          mkdir -p vercel-bundle
+          if [ -d app/src/main/assets ]; then
+            cp -r app/src/main/assets/* vercel-bundle/ 2>/dev/null || true
+            rm -rf vercel-bundle/model-en-us vercel-bundle/.gitkeep
+          fi
+          if [ ! -f vercel-bundle/index.html ] && [ -f index.html ]; then
+            cp index.html vercel-bundle/index.html
+          fi
+          if [ -f app/src/main/res/drawable/ic_launcher.png ]; then
+            cp app/src/main/res/drawable/ic_launcher.png vercel-bundle/icon.png
+          fi
+          cat << 'EOF' > vercel-bundle/manifest.json
+          {
+            "name": "Glaadwin AI",
+            "short_name": "Glaadwin AI",
+            "start_url": "/",
+            "display": "standalone",
+            "background_color": "#040914",
+            "theme_color": "#040914",
+            "icons": [
+              {
+                "src": "/icon.png",
+                "sizes": "512x512",
+                "type": "image/png"
+              }
+            ]
+          }
+          EOF
+          cat << 'EOF' > vercel-bundle/vercel.json
+          {
+            "headers": [
+              {
+                "source": "/(.*)",
+                "headers": [
+                  { "key": "X-Content-Type-Options", "value": "nosniff" },
+                  { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+                ]
+              }
+            ]
+          }
+          EOF
+          cd vercel-bundle && zip -r ../glaadwin-ai-vercel.zip .
+
+      - name: Upload Vercel ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: glaadwin-ai-vercel-zip
+          path: glaadwin-ai-vercel.zip
+          if-no-files-found: error
+          
