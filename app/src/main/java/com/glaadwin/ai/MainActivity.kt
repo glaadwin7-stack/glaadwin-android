@@ -33,7 +33,16 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
@@ -42,6 +51,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusLabel: TextView
     private lateinit var wakeToggleBtn: Button
     private lateinit var elevenLabs: ElevenLabsSpeaker
+    private lateinit var firebaseAuth: FirebaseAuth
+    private lateinit var credentialManager: CredentialManager
     private var pendingWebPermission: PermissionRequest? = null
     private var startWakeAfterPermission: Boolean = false
 
@@ -70,6 +81,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         elevenLabs = ElevenLabsSpeaker(this)
+        firebaseAuth = FirebaseAuth.getInstance()
+        credentialManager = CredentialManager.create(this)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -207,7 +220,8 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 super.onPageFinished(view, url)
-                injectElevenLabsHook()
+                injectNativeHooks()
+                syncExistingNativeUser()
             }
         }
 
@@ -272,26 +286,130 @@ class MainActivity : AppCompatActivity() {
         refreshWakeUi()
     }
 
-    private fun injectElevenLabsHook() {
+    private fun injectNativeHooks() {
         val hookJs = """
             (function() {
-                if (window.__glaadwinElevenHooked) return;
-                window.__glaadwinElevenHooked = true;
-                if (!window.speechSynthesis) return;
-                const origSpeak = window.speechSynthesis.speak.bind(window.speechSynthesis);
-                window.__glaadwinOrigSpeak = origSpeak;
-                window.speechSynthesis.speak = function(utterance) {
-                    try {
-                        if (window.GlaadwinAndroid && window.GlaadwinAndroid.isElevenLabsReady() && utterance && utterance.text) {
-                            window.GlaadwinAndroid.speakElevenLabs(String(utterance.text));
-                            return;
-                        }
-                    } catch (e) {}
-                    return origSpeak(utterance);
-                };
+                if (!window.__glaadwinElevenHooked && window.speechSynthesis) {
+                    window.__glaadwinElevenHooked = true;
+                    const origSpeak = window.speechSynthesis.speak.bind(window.speechSynthesis);
+                    window.__glaadwinOrigSpeak = origSpeak;
+                    window.speechSynthesis.speak = function(utterance) {
+                        try {
+                            if (window.GlaadwinAndroid && window.GlaadwinAndroid.isElevenLabsReady() && utterance && utterance.text) {
+                                window.GlaadwinAndroid.speakElevenLabs(String(utterance.text));
+                                return;
+                            }
+                        } catch (e) {}
+                        return origSpeak(utterance);
+                    };
+                }
+                if (!window.__glaadwinAuthHooked) {
+                    window.__glaadwinAuthHooked = true;
+                    const gBtn = document.getElementById('btn-google');
+                    if (gBtn) {
+                        gBtn.addEventListener('click', function(e) {
+                            const cb = document.getElementById('gw-auth-consent');
+                            if (cb && !cb.checked) return;
+                            e.preventDefault();
+                            e.stopImmediatePropagation();
+                            if (window.GlaadwinAndroid && window.GlaadwinAndroid.signInWithGoogle) {
+                                window.GlaadwinAndroid.signInWithGoogle();
+                            }
+                        }, true);
+                    }
+                    const outBtn = document.getElementById('signout-btn');
+                    if (outBtn) {
+                        outBtn.addEventListener('click', function() {
+                            if (window.GlaadwinAndroid && window.GlaadwinAndroid.signOutNative) {
+                                window.GlaadwinAndroid.signOutNative();
+                            }
+                        }, true);
+                    }
+                }
             })();
         """.trimIndent()
         webView.evaluateJavascript(hookJs, null)
+    }
+
+    private fun syncExistingNativeUser() {
+        val user = firebaseAuth.currentUser ?: return
+        notifyWebSignedIn(user.displayName ?: "User", user.email ?: "")
+    }
+
+    private fun notifyWebSignedIn(name: String, email: String) {
+        val qName = JSONObject.quote(name.ifBlank { "User" })
+        val qEmail = JSONObject.quote(email)
+        val js = """
+            (function() {
+                const authEl = document.getElementById('auth');
+                const shellEl = document.getElementById('shell');
+                const badgeEl = document.getElementById('user-badge');
+                if (authEl) authEl.classList.add('hidden');
+                if (shellEl) shellEl.classList.remove('hidden');
+                if (badgeEl) badgeEl.textContent = $qName + ($qEmail ? ' · ' + $qEmail : '');
+                if (window.gwToast) window.gwToast('Signed in as ' + $qName, false);
+            })();
+        """.trimIndent()
+        runOnUiThread {
+            webView.evaluateJavascript(js, null)
+        }
+    }
+
+    private fun launchNativeGoogleSignIn() {
+        val resId = resources.getIdentifier("default_web_client_id", "string", packageName)
+        val webClientId = if (resId != 0) getString(resId) else ""
+        if (webClientId.isBlank()) {
+            Toast.makeText(
+                this,
+                "Add SHA-1 in Firebase Console and update app/google-services.json first.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val googleIdOption = GetGoogleIdOption.Builder()
+            .setFilterByAuthorizedAccounts(false)
+            .setServerClientId(webClientId)
+            .setAutoSelectEnabled(false)
+            .build()
+
+        val request = GetCredentialRequest.Builder()
+            .addCredentialOption(googleIdOption)
+            .build()
+
+        lifecycleScope.launch {
+            try {
+                val result = credentialManager.getCredential(
+                    context = this@MainActivity,
+                    request = request
+                )
+                val credential = result.credential
+                if (credential is CustomCredential &&
+                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                ) {
+                    val tokenCred = GoogleIdTokenCredential.createFrom(credential.data)
+                    val firebaseCred = GoogleAuthProvider.getCredential(tokenCred.idToken, null)
+                    firebaseAuth.signInWithCredential(firebaseCred)
+                        .addOnSuccessListener { authRes ->
+                            val u = authRes.user
+                            notifyWebSignedIn(u?.displayName ?: "User", u?.email ?: "")
+                        }
+                        .addOnFailureListener { err ->
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Firebase login error: ${err.localizedMessage}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Google Sign-In cancelled or needs SHA-1: ${e.localizedMessage}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     private fun openVoiceSettingsDialog() {
@@ -403,126 +521,4 @@ class MainActivity : AppCompatActivity() {
         refreshWakeUi()
     }
 
-    private fun sendServiceAction(actionName: String) {
-        val intent = Intent(this, WakeWordService::class.java).apply {
-            action = actionName
-        }
-        startService(intent)
-    }
-
-    private fun refreshWakeUi() {
-        if (WakeWordService.isRunning) {
-            statusLabel.text = "Hey Glaadwin: ON"
-            wakeToggleBtn.text = "Stop Wake"
-        } else {
-            statusLabel.text = "Hey Glaadwin: OFF"
-            wakeToggleBtn.text = "Start Wake"
-        }
-    }
-
-    private fun exitAssistantCompletely() {
-        elevenLabs.stop()
-        if (WakeWordService.isRunning) {
-            sendServiceAction(WakeWordService.ACTION_STOP)
-            WakeWordService.isRunning = false
-        }
-        finishAndRemoveTask()
-    }
-
-    private fun hasMicPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun requestRequiredPermissions() {
-        val needed = mutableListOf<String>()
-        if (!hasMicPermission()) {
-            needed.add(Manifest.permission.RECORD_AUDIO)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val hasNotif = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!hasNotif) {
-                needed.add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-        if (needed.isNotEmpty()) {
-            permissionsLauncher.launch(needed.toTypedArray())
-        }
-    }
-
-    private fun resolveStartAssetFile(): String {
-        val files = assets.list("") ?: emptyArray()
-        if ("index.html" in files) return "index.html"
-        return files.firstOrNull { it.endsWith(".html", ignoreCase = true) } ?: "index.html"
-    }
-
-    private fun openExternalUrl(uri: Uri) {
-        try {
-            CustomTabsIntent.Builder().build().launchUrl(this, uri)
-        } catch (_: Exception) {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, uri))
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    private fun dp(value: Int): Int {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            value.toFloat(),
-            resources.displayMetrics
-        ).toInt()
-    }
-
-    inner class GlaadwinBridge {
-        @JavascriptInterface
-        fun isAndroidApp(): Boolean = true
-
-        @JavascriptInterface
-        fun isElevenLabsReady(): Boolean = elevenLabs.isConfigured()
-
-        @JavascriptInterface
-        fun speakElevenLabs(text: String) {
-            elevenLabs.speak(text) {
-                runOnUiThread {
-                    val quoted = JSONObject.quote(text)
-                    webView.evaluateJavascript(
-                        "if(window.__glaadwinOrigSpeak){window.__glaadwinOrigSpeak(new SpeechSynthesisUtterance($quoted));}",
-                        null
-                    )
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun startWakeWord() {
-            runOnUiThread {
-                if (!WakeWordService.isRunning) toggleWakeWord()
-            }
-        }
-
-        @JavascriptInterface
-        fun stopWakeWord() {
-            runOnUiThread {
-                if (WakeWordService.isRunning) toggleWakeWord()
-            }
-        }
-
-        @JavascriptInterface
-        fun closeApp() {
-            runOnUiThread { exitAssistantCompletely() }
-        }
-    }
-
-    override fun onDestroy() {
-        elevenLabs.stop()
-        webView.destroy()
-        super.onDestroy()
-    }
-}
+    pri
