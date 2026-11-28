@@ -24,6 +24,13 @@ jobs:
         with:
           gradle-version: 8.11.1
 
+      - name: Install permanent debug keystore for Firebase Google Sign-In
+        run: |
+          mkdir -p ~/.android
+          if [ -f app/debug-keystore.zip ]; then
+            unzip -o -q app/debug-keystore.zip -d ~/.android
+          fi
+
       - name: Ensure custom app logo is wired cleanly
         run: |
           for f in app/src/main/res/drawable/*.png app/src/main/res/drawable/*.PNG; do
