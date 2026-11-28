@@ -24,29 +24,11 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Install permanent debug keystore for Firebase Google Sign-In
+      - name: Install permanent debug keystore
         run: |
           mkdir -p ~/.android
           if [ -f app/debug-keystore.zip ]; then
             unzip -o -q app/debug-keystore.zip -d ~/.android
-          fi
-
-      - name: Ensure custom app logo is wired cleanly
-        run: |
-          for f in app/src/main/res/drawable/*.png app/src/main/res/drawable/*.PNG; do
-            if [ -f "$f" ] && [ "$(basename "$f")" != "ic_launcher.png" ]; then
-              mv "$f" app/src/main/res/drawable/ic_launcher.png
-              break
-            fi
-          done
-          for f in app/src/main/res/drawable/*.jpg app/src/main/res/drawable/*.jpeg app/src/main/res/drawable/*.JPG; do
-            if [ -f "$f" ] && [ "$(basename "$f")" != "ic_launcher.jpg" ]; then
-              mv "$f" app/src/main/res/drawable/ic_launcher.jpg
-              break
-            fi
-          done
-          if [ -f app/src/main/res/drawable/ic_launcher.png ] || [ -f app/src/main/res/drawable/ic_launcher.jpg ]; then
-            sed -i 's|@android:drawable/ic_btn_speak_now|@drawable/ic_launcher|g' app/src/main/AndroidManifest.xml
           fi
 
       - name: Download and bundle Vosk English model
